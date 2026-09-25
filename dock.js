@@ -1461,6 +1461,16 @@ export let Dock = GObject.registerClass(
       if (this._pauseBounce && this._pauseBounce > 0) {
         return;
       }
+      // launching an app without windows: the icon waits up for the window
+      let app = container.child?.app;
+      if (
+        this.extension.lamp_open_animation &&
+        app?.get_n_windows &&
+        !app.get_n_windows()
+      ) {
+        this.extension.lampLauncher?.expect(app);
+        return;
+      }
       if (!this.extension.open_app_animation) {
         return;
       }

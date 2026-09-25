@@ -13,6 +13,7 @@
 * Bug fixes
 * Animations run at the display's refresh rate (e.g. 120/144/165Hz) instead of being capped at ~60fps
 * Smoother magnification: icons scale and spread continuously as the pointer moves between them
+* Lamp opening animation (macOS-like): a launching app's icon jumps up and waits until its window opens, which comes out of the icon like a genie from a lamp (uses compiz-alike-magic-lamp-effect's look when enabled)
 
 # Release 84
 

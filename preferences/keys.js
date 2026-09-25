@@ -53,6 +53,11 @@ export const SettingsKeys = () => {
       key_maps: {},
       // test: { values: [0, 1] },
     },
+    'lamp-open-animation': {
+      default_value: false,
+      widget_type: 'switch',
+      key_maps: {},
+    },
     'lamp-app-animation': {
       default_value: false,
       widget_type: 'switch',

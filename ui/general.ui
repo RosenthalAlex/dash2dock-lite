@@ -118,6 +118,19 @@
           </object>
         </child>
         <child>
+          <object class="AdwActionRow" id="lamp-open-animation-row">
+            <property name="visible">true</property>
+            <property name="title" translatable="yes">Lamp Opening Animation</property>
+            <property name="subtitle" translatable="yes">When launching an app, its icon jumps up and waits until the app's window opens, which then comes out of the icon like a genie from a lamp. Uses the look of the [compiz-alike-magic-lamp-effect@hermes83.github.com] extension when it is enabled.</property>
+            <property name="activatable-widget">lamp-open-animation</property>
+            <child>
+              <object class="GtkSwitch" id="lamp-open-animation">
+                <property name="valign">center</property>
+              </object>
+            </child>
+          </object>
+        </child>
+        <child>
           <object class="AdwActionRow" id="lamp-app-animation-row">
             <property name="visible">true</property>
             <property name="title" translatable="yes">Lamp Animation</property>

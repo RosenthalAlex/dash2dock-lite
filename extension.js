@@ -35,6 +35,7 @@ import { Style } from './style.js';
 import { Dock } from './dock.js';
 import { Services } from './services.js';
 import { Integrations } from './integrations.js';
+import { LampLauncher } from './lamp.js';
 import { runTests } from './diagnostics.js';
 
 import {
@@ -217,6 +218,10 @@ export default class Dash2DockLiteExt extends Extension {
     this.integrations.extension = this;
     this.integrations.enable();
 
+    // macOS-like launch animation
+    this.lampLauncher = new LampLauncher(this);
+    this.lampLauncher.enable();
+
     // service
     this.services = new Services();
     this.services.extension = this;
@@ -266,6 +271,9 @@ export default class Dash2DockLiteExt extends Extension {
 
     this.integrations.disable();
     this.integrations = null;
+
+    this.lampLauncher?.disable();
+    this.lampLauncher = null;
 
     this.services.disable();
     this.services = null;

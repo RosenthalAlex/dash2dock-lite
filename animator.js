@@ -58,6 +58,11 @@ function smoothstep(edge0, edge1, x) {
   return t * t * (3 - 2 * t);
 }
 
+// launch animation (liftIcon): times in msecs
+const LIFT_RISE_TIME = 250;
+const LIFT_FALL_TIME = 600;
+const LIFT_TIMEOUT = 15000;
+
 const DOT_CANVAS_SIZE = 96;
 
 export let Animator = class {
@@ -582,8 +587,8 @@ export let Animator = class {
           (translationY - icon._icon.translationY) * blend;
       }
 
-      // clear bounce animation
-      if (icon._appwell) {
+      // clear bounce animation (a lifted launching icon stays up)
+      if (icon._appwell && !this._lifts?.has(icon._appwell._id)) {
         icon._appwell.translationY = 0;
         didBounce = icon._appwell._bounce;
         // clear bounce
@@ -1126,49 +1131,154 @@ export let Animator = class {
     dock.extension.integrations.bms_update_size(this);
   }
 
+  // [container, appwell] of the dock icon of `app_id`, if it is shown
+  _bounceTarget(app_id) {
+    let dock = this.dock;
+    if (dock._dragging) return [null, null];
+    let icons = dock._findIcons();
+    let icon = icons.find((icon) => {
+      return icon._appwell && icon._appwell._id == app_id;
+    });
+    if (!icon || !icon._appwell) {
+      return [null, null];
+    }
+    return [icon._appwell.get_parent(), icon._appwell];
+  }
+
+  _translateBounceDecor(container, appwell) {
+    try {
+      if (!container._icon) return;
+      if (container._renderer) {
+        container._renderer.translationY = appwell.translationY;
+      }
+      if (container._image) {
+        container._image.translationY = appwell.translationY;
+      }
+      if (container._badge) {
+        container._badge.translationY = appwell.translationY;
+      }
+      if (container._label) {
+        container._label.opacity = 0;
+      }
+    } catch (err) {
+      console.log(err);
+    }
+  }
+
+  // raise the icon of `app_id` by `res` pixels, away from the screen edge
+  _applyBounce(app_id, res) {
+    let dock = this.dock;
+    let [container, appwell] = this._bounceTarget(app_id);
+    if (!appwell) return;
+    try {
+      appwell._bounce = true;
+      if (dock.isVertical()) {
+        appwell.translation_x =
+          dock._position == DockPosition.LEFT ? res : -res;
+        if (container._renderer) {
+          container._renderer.translationX = appwell.translationX;
+        }
+      } else {
+        appwell.translation_y =
+          dock._position == DockPosition.BOTTOM ? -res : res;
+        if (container._renderer) {
+          container._renderer.translationY = appwell.translationY;
+        }
+      }
+    } catch (err) {
+      console.log(err);
+    }
+    this._translateBounceDecor(container, appwell);
+  }
+
+  _bounceTravel() {
+    let dock = this.dock;
+    return (
+      (dock._iconSize / 3) *
+      ((0.25 + dock.extension.animation_bounce_height) * 1.5)
+    );
+  }
+
+  // macOS-like launch: the icon jumps up and stays there until dropIcon()
+  // is called (the app's window opened), then falls back with a bounce
+  liftIcon(appwell) {
+    let dock = this.dock;
+    let app_id = appwell._id;
+    this._lifts = this._lifts ?? new Map();
+    let lift = this._lifts.get(app_id);
+    if (lift) {
+      // lifted again while falling: go back up from where it is
+      if (lift.phase == 'fall') {
+        lift.phase = 'hold';
+        lift.time = 0;
+      }
+      return;
+    }
+
+    let travel = this._bounceTravel();
+    lift = { phase: 'rise', time: 0, total: 0 };
+    this._lifts.set(app_id, lift);
+
+    lift.seq = dock.extension._hiTimer.runLoop(
+      (s) => {
+        let dt = s._elapsed;
+        lift.time += dt;
+        lift.total += dt;
+
+        if (lift.phase != 'fall' && lift.total > LIFT_TIMEOUT) {
+          // the app never showed a window
+          lift.phase = 'fall';
+          lift.time = 0;
+        }
+
+        let res = travel;
+        if (lift.phase == 'rise') {
+          let p = Math.min(lift.time / LIFT_RISE_TIME, 1);
+          res = travel * CubicEaseOut(p);
+          if (p >= 1) {
+            lift.phase = 'hold';
+            lift.time = 0;
+          }
+        } else if (lift.phase == 'fall') {
+          let t = Math.min(lift.time, LIFT_FALL_TIME);
+          res = Bounce.easeOut(t, travel, -travel, LIFT_FALL_TIME);
+          if (lift.time >= LIFT_FALL_TIME) {
+            this._applyBounce(app_id, 0);
+            let [, appwell] = this._bounceTarget(app_id);
+            if (appwell) appwell._bounce = false;
+            dock.extension._hiTimer.cancel(lift.seq);
+            this._lifts.delete(app_id);
+            return;
+          }
+        }
+
+        this._applyBounce(app_id, res);
+      },
+      0,
+      'liftIcon'
+    );
+  }
+
+  dropIcon(app_id) {
+    let lift = this._lifts?.get(app_id);
+    if (!lift || lift.phase == 'fall') return;
+    lift.phase = 'fall';
+    lift.time = 0;
+  }
+
   bounceIcon(appwell) {
     let dock = this.dock;
     let app_id = appwell._id;
 
     // let scaleFactor = dock.getMonitor().geometry_scale;
     //! why not scaleFactor?
-    let travel =
-      (dock._iconSize / 3) *
-      ((0.25 + dock.extension.animation_bounce_height) * 1.5);
+    let travel = this._bounceTravel();
     // * scaleFactor;
     appwell.translation_y = 0;
 
-    const getTarget = (app_id) => {
-      if (dock._dragging) return [null, null];
-      let icons = dock._findIcons();
-      let icon = icons.find((icon) => {
-        return icon._appwell && icon._appwell._id == app_id;
-      });
-      if (!icon || !icon._appwell) {
-        return [null, null];
-      }
-      return [icon._appwell.get_parent(), icon._appwell];
-    };
-
-    const translateDecor = (container, appwell) => {
-      try {
-        if (!container._icon) return;
-        if (container._renderer) {
-          container._renderer.translationY = appwell.translationY;
-        }
-        if (container._image) {
-          container._image.translationY = appwell.translationY;
-        }
-        if (container._badge) {
-          container._badge.translationY = appwell.translationY;
-        }
-        if (container._label) {
-          container._label.opacity = 0;
-        }
-      } catch (err) {
-        console.log(err);
-      }
-    };
+    const getTarget = (app_id) => this._bounceTarget(app_id);
+    const translateDecor = (container, appwell) =>
+      this._translateBounceDecor(container, appwell);
 
     let t = 250;
     let _frames = [
@@ -1176,54 +1286,14 @@ export let Animator = class {
         _duration: t,
         _func: (f, s) => {
           let res = Linear.easeNone(f._time, 0, travel, f._duration);
-          let [container, appwell] = getTarget(app_id);
-          if (!appwell) return;
-          try {
-            appwell._bounce = true;
-            if (dock.isVertical()) {
-              appwell.translation_x =
-                dock._position == DockPosition.LEFT ? res : -res;
-              if (container._renderer) {
-                container._renderer.translationX = appwell.translationX;
-              }
-            } else {
-              appwell.translation_y =
-                dock._position == DockPosition.BOTTOM ? -res : res;
-              if (container._renderer) {
-                container._renderer.translationY = appwell.translationY;
-              }
-            }
-          } catch (err) {
-            console.log(err);
-          }
-          translateDecor(container, appwell);
+          this._applyBounce(app_id, res);
         },
       },
       {
         _duration: t * 3,
         _func: (f, s) => {
           let res = Bounce.easeOut(f._time, travel, -travel, f._duration);
-          let [container, appwell] = getTarget(app_id);
-          if (!appwell) return;
-          try {
-            appwell._bounce = true;
-            if (dock.isVertical()) {
-              appwell.translation_x = appwell.translation_x =
-                dock._position == DockPosition.LEFT ? res : -res;
-              if (container._renderer) {
-                container._renderer.translationX = appwell.translationX;
-              }
-            } else {
-              appwell.translation_y =
-                dock._position == DockPosition.BOTTOM ? -res : res;
-              if (container._renderer) {
-                container._renderer.translationY = appwell.translationY;
-              }
-            }
-          } catch (err) {
-            console.log(err);
-          }
-          translateDecor(container, appwell);
+          this._applyBounce(app_id, res);
         },
       },
     ];

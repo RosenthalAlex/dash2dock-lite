@@ -5,6 +5,7 @@ import St from 'gi://St';
 import Graphene from 'gi://Graphene';
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 const Point = Graphene.Point;
 
 import { Dot } from './apps/dot.js';
@@ -76,6 +77,12 @@ export let Animator = class {
   }
 
   disable() {
+    this._lifts?.forEach((lift) => {
+      this._stopLift(lift);
+      this._clearLiftTimeout(lift);
+    });
+    this._lifts = null;
+
     if (this._target) {
       this._target.remove_all_children();
     }
@@ -588,7 +595,11 @@ export let Animator = class {
       }
 
       // clear bounce animation (a lifted launching icon stays up)
-      if (icon._appwell && !this._lifts?.has(icon._appwell._id)) {
+      let lift = icon._appwell ? this._lifts?.get(icon._appwell._id) : null;
+      if (lift?.phase == 'hold' && !lift.seq) {
+        this._applyBounce(icon._appwell._id, lift.travel);
+      }
+      if (icon._appwell && !lift) {
         icon._appwell.translationY = 0;
         didBounce = icon._appwell._bounce;
         // clear bounce
@@ -1202,61 +1213,34 @@ export let Animator = class {
   // macOS-like launch: the icon jumps up and stays there until dropIcon()
   // is called (the app's window opened), then falls back with a bounce
   liftIcon(appwell) {
-    let dock = this.dock;
     let app_id = appwell._id;
     this._lifts = this._lifts ?? new Map();
     let lift = this._lifts.get(app_id);
     if (lift) {
-      // lifted again while falling: go back up from where it is
+      // lifted again while falling: go back up
       if (lift.phase == 'fall') {
         lift.phase = 'hold';
         lift.time = 0;
+        this._runLift(app_id);
       }
       return;
     }
 
-    let travel = this._bounceTravel();
-    lift = { phase: 'rise', time: 0, total: 0 };
+    lift = { phase: 'rise', time: 0, travel: this._bounceTravel() };
     this._lifts.set(app_id, lift);
 
-    lift.seq = dock.extension._hiTimer.runLoop(
-      (s) => {
-        let dt = s._elapsed;
-        lift.time += dt;
-        lift.total += dt;
-
-        if (lift.phase != 'fall' && lift.total > LIFT_TIMEOUT) {
-          // the app never showed a window
-          lift.phase = 'fall';
-          lift.time = 0;
-        }
-
-        let res = travel;
-        if (lift.phase == 'rise') {
-          let p = Math.min(lift.time / LIFT_RISE_TIME, 1);
-          res = travel * CubicEaseOut(p);
-          if (p >= 1) {
-            lift.phase = 'hold';
-            lift.time = 0;
-          }
-        } else if (lift.phase == 'fall') {
-          let t = Math.min(lift.time, LIFT_FALL_TIME);
-          res = Bounce.easeOut(t, travel, -travel, LIFT_FALL_TIME);
-          if (lift.time >= LIFT_FALL_TIME) {
-            this._applyBounce(app_id, 0);
-            let [, appwell] = this._bounceTarget(app_id);
-            if (appwell) appwell._bounce = false;
-            dock.extension._hiTimer.cancel(lift.seq);
-            this._lifts.delete(app_id);
-            return;
-          }
-        }
-
-        this._applyBounce(app_id, res);
-      },
-      0,
-      'liftIcon'
+    // the app never showed a window
+    lift.timeoutId = GLib.timeout_add(
+      GLib.PRIORITY_DEFAULT,
+      LIFT_TIMEOUT,
+      () => {
+        lift.timeoutId = 0;
+        this.dropIcon(app_id);
+        return GLib.SOURCE_REMOVE;
+      }
     );
+
+    this._runLift(app_id);
   }
 
   dropIcon(app_id) {
@@ -1264,6 +1248,70 @@ export let Animator = class {
     if (!lift || lift.phase == 'fall') return;
     lift.phase = 'fall';
     lift.time = 0;
+    this._clearLiftTimeout(lift);
+    this._runLift(app_id);
+  }
+
+  // Animates the rise and the fall of a lifted icon, frame by frame. While it
+  // holds up (the app loads, which can take seconds), nothing is redrawn.
+  _runLift(app_id) {
+    let lift = this._lifts?.get(app_id);
+    if (!lift || lift.seq) return;
+
+    lift.seq = this.dock.extension._hiTimer.runLoop(
+      (s) => {
+        lift.time += s._elapsed;
+        let travel = lift.travel;
+
+        if (lift.phase == 'rise') {
+          let p = Math.min(lift.time / LIFT_RISE_TIME, 1);
+          this._applyBounce(app_id, travel * CubicEaseOut(p));
+          if (p >= 1) {
+            lift.phase = 'hold';
+            lift.time = 0;
+            this._stopLift(lift);
+          }
+          return;
+        }
+
+        if (lift.phase == 'hold') {
+          this._applyBounce(app_id, travel);
+          this._stopLift(lift);
+          return;
+        }
+
+        // fall
+        let t = Math.min(lift.time, LIFT_FALL_TIME);
+        this._applyBounce(
+          app_id,
+          Bounce.easeOut(t, travel, -travel, LIFT_FALL_TIME)
+        );
+        if (lift.time >= LIFT_FALL_TIME) {
+          this._applyBounce(app_id, 0);
+          let [, appwell] = this._bounceTarget(app_id);
+          if (appwell) appwell._bounce = false;
+          this._stopLift(lift);
+          this._clearLiftTimeout(lift);
+          this._lifts.delete(app_id);
+        }
+      },
+      0,
+      'liftIcon'
+    );
+  }
+
+  _stopLift(lift) {
+    if (lift.seq) {
+      this.dock.extension._hiTimer?.cancel(lift.seq);
+      lift.seq = null;
+    }
+  }
+
+  _clearLiftTimeout(lift) {
+    if (lift.timeoutId) {
+      GLib.source_remove(lift.timeoutId);
+      lift.timeoutId = 0;
+    }
   }
 
   bounceIcon(appwell) {

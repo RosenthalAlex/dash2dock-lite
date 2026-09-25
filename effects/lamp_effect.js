@@ -31,6 +31,7 @@ export const LampOpenEffect = GObject.registerClass(
       this.DURATION = params.duration ?? 400;
       this.X_TILES = params.xTiles ?? 10;
       this.Y_TILES = params.yTiles ?? 10;
+      this.onDone = params.onDone ?? null;
 
       this.monitor = { x: 0, y: 0, width: 0, height: 0 };
       this.iconMonitor = null;
@@ -142,6 +143,10 @@ export const LampOpenEffect = GObject.registerClass(
     }
 
     destroy() {
+      let onDone = this.onDone;
+      this.onDone = null;
+      onDone?.();
+
       if (this.timeline) {
         this.timeline.disconnectObject(this);
         this.timeline.stop();

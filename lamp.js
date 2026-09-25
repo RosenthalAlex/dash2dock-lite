@@ -10,6 +10,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import { LampOpenEffect, LAMP_EFFECT_NAME } from './effects/lamp_effect.js';
 
 const COMPIZ_UUID = 'compiz-alike-magic-lamp-effect@hermes83.github.com';
+const BMS_BLUR_ACTOR = 'bms-application-blurred-widget';
 
 // a launched app has this long (msecs) to show its first window
 const LAUNCH_TIMEOUT = 15000;
@@ -117,12 +118,24 @@ export const LampLauncher = class {
     actor.opacity = 255;
 
     actor.get_effect(LAMP_EFFECT_NAME)?.destroy();
+
+    // The deformation renders the window offscreen, where a background blur
+    // (Blur my Shell's application blur) has nothing behind it: it would show
+    // nothing, yet cost a full blur every frame. Hide it meanwhile.
+    let blur = actor
+      .get_children()
+      .find((c) => c.name === BMS_BLUR_ACTOR && c.visible);
+    blur?.hide();
+
     actor.add_effect_with_name(
       LAMP_EFFECT_NAME,
       new LampOpenEffect({
         icon: target.rect,
         side: target.side,
         ...this._compizSettings(),
+        onDone: () => {
+          if (blur && blur.get_parent() === actor) blur.show();
+        },
       })
     );
   }

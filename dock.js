@@ -84,6 +84,10 @@ export let Dock = GObject.registerClass(
         get_parent: () => {
           return this;
         },
+        // blur-my-shell connects to Dash-to-Dock's slider (a GObject) for
+        // slide/allocation changes; we position the blur ourselves
+        connect: () => 0,
+        disconnect: () => {},
       };
 
       // pretend to be Dash-to-Dock

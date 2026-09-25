@@ -43,7 +43,8 @@ export const DockAlignment = {
   END: 'end',
 };
 
-const PREVIEW_FRAMES = 64;
+const PREVIEW_DURATION = 64 * 15; // msecs
+const FAST_FORWARD_STEP = 15; // msecs
 const ANIM_DEBOUNCE_END_DELAY = 750;
 
 const MIN_SCROLL_RESOLUTION = 4;
@@ -1203,7 +1204,7 @@ export let Dock = GObject.registerClass(
     }
 
     preview() {
-      this._preview = PREVIEW_FRAMES;
+      this._preview = PREVIEW_DURATION;
       this.animator._computed = null;
     }
 
@@ -1226,7 +1227,7 @@ export let Dock = GObject.registerClass(
         }
 
         this.simulated_pointer = p;
-        this._preview--;
+        this._preview = Math.max(this._preview - dt, 0);
       }
 
       //! add layout here instead of at the
@@ -1235,7 +1236,7 @@ export let Dock = GObject.registerClass(
       // hack to mitigate jerkiness when a new icon is inserted
       if (!this._pauseBounce || this._pauseBounce <= 0) {
         while (this._fast_forward && this._fast_forward-- > 0) {
-          this.animate(dt);
+          this.animate(FAST_FORWARD_STEP);
           this.dash.opacity = 0;
         }
       }
@@ -1281,7 +1282,7 @@ export let Dock = GObject.registerClass(
         if (!this._animationSeq) {
           this._animationSeq = this.extension._hiTimer.runLoop(
             (s) => {
-              this.animate(s._delay);
+              this.animate(s._elapsed);
             },
             this.animationInterval,
             'animationTimer'

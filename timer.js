@@ -1,6 +1,10 @@
 'use strict';
 
 import GLib from 'gi://GLib';
+import Clutter from 'gi://Clutter';
+
+// clamp for frame-synced deltas; avoids huge jumps after a stall
+const MAX_FRAME_DT = 50;
 
 export const Timer = class {
   constructor(name) {
@@ -9,8 +13,12 @@ export const Timer = class {
     this._subscriberId = 0xff;
   }
 
-  initialize(resolution) {
+  // options.actor: tick on the compositor frame clock of this actor's
+  // monitor (the highest refresh rate one if it spans several) instead of
+  // a fixed GLib timeout, so animations run at the display's refresh rate
+  initialize(resolution, options = {}) {
     this._resolution = resolution || 1000;
+    this._frameActor = options.actor ?? this._frameActor ?? null;
     this._autoStart = true;
     this._autoHibernate = true;
 
@@ -23,6 +31,7 @@ export const Timer = class {
     this._autoStart = false;
     this._hibernating = false;
     this.stop();
+    this._frameActor = null;
   }
 
   start(resolution) {
@@ -32,11 +41,29 @@ export const Timer = class {
     }
     this._resolution = resolution || 1000;
     this._time = 0;
-    this._timeoutId = GLib.timeout_add(
-      GLib.PRIORITY_DEFAULT,
-      this._resolution,
-      this.onUpdate.bind(this)
-    );
+    if (this._frameActor) {
+      this._lastFrameTime = GLib.get_monotonic_time();
+      this._timeline = new Clutter.Timeline({
+        actor: this._frameActor,
+        duration: 1000,
+        repeat_count: -1,
+      });
+      this._timelineId = this._timeline.connect('new-frame', () => {
+        let now = GLib.get_monotonic_time();
+        let dt = (now - this._lastFrameTime) / 1000;
+        if (dt <= 0) return;
+        this._lastFrameTime = now;
+        this.onUpdate(Math.min(dt, MAX_FRAME_DT));
+      });
+      this._timeoutId = this._timelineId;
+      this._timeline.start();
+    } else {
+      this._timeoutId = GLib.timeout_add(
+        GLib.PRIORITY_DEFAULT,
+        this._resolution,
+        () => this.onUpdate()
+      );
+    }
     this._hibernating = false;
     this.onStart();
   }
@@ -46,7 +73,14 @@ export const Timer = class {
       // print('already stopped');
       return;
     }
-    GLib.source_remove(this._timeoutId);
+    if (this._timeline) {
+      this._timeline.disconnect(this._timelineId);
+      this._timeline.stop();
+      this._timeline = null;
+      this._timelineId = null;
+    } else {
+      GLib.source_remove(this._timeoutId);
+    }
     this._timeoutId = null;
     this.onStop();
   }
@@ -131,22 +165,24 @@ export const Timer = class {
     });
   }
 
-  onUpdate() {
+  onUpdate(dt) {
     if (!this._timeoutId || this._paused) {
       return true;
     }
 
+    dt = dt ?? this._resolution;
+
     this._subscribers.forEach((s) => {
       if (s.onUpdate) {
-        s.onUpdate(s, this._resolution);
+        s.onUpdate(s, dt);
       }
     });
 
-    this._time += this._resolution;
+    this._time += dt;
 
     if (this._autoHibernate) {
       if (!this._subscribers.length) {
-        this._hibernatCounter += this._resolution;
+        this._hibernatCounter += dt;
         if (this._hibernatCounter >= this._hibernateWait) {
           this.hibernate();
         }
@@ -228,6 +264,7 @@ export const Timer = class {
   runLoop(func, delay, name) {
     if (typeof func === 'object') {
       func._time = 0;
+      func._elapsed = 0;
       return this.subscribe(func);
     }
     let obj = {
@@ -238,9 +275,11 @@ export const Timer = class {
       _func: func,
       onUpdate: (s, dt) => {
         s._time += dt;
+        s._elapsed = (s._elapsed || 0) + dt;
         if (s._time >= s._delay) {
           s._func(s);
-          s._time -= s._delay;
+          s._elapsed = 0;
+          s._time = s._delay > 0 ? s._time % s._delay : 0;
         }
       },
     };

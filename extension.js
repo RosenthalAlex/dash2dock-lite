@@ -177,9 +177,12 @@ export default class Dash2DockLiteExt extends Extension {
     this._timer.initialize(3500);
 
     // for animation runs
-    // resolution (15) will be modified by animation-fps
+    // synced to the compositor frame clock (display refresh rate);
+    // animation-fps may throttle the dock animation below that
     this._hiTimer = new Timer('hi-res timer');
-    this._hiTimer.initialize(15);
+    this._hiTimer.initialize(ANIM_INTERVAL, {
+      actor: Main.layoutManager.uiGroup,
+    });
 
     // for deferred or debounced runs
     this._loTimer = new Timer('lo-res timer');
@@ -948,10 +951,14 @@ export default class Dash2DockLiteExt extends Extension {
     this.docks.forEach((dock) => {
       dock.cancelAnimations();
     });
-    this.animationInterval =
-      ANIM_INTERVAL + (this.animation_fps || 0) * ANIM_INTERVAL_PAD;
+    // High (0): every frame at the display's refresh rate
+    this.animationInterval = this.animation_fps
+      ? ANIM_INTERVAL + this.animation_fps * ANIM_INTERVAL_PAD
+      : 0;
     this._hiTimer.shutdown();
-    this._hiTimer.initialize(this.animationInterval);
+    this._hiTimer.initialize(ANIM_INTERVAL, {
+      actor: Main.layoutManager.uiGroup,
+    });
   }
 
   _updateShrink(disable) {

@@ -32,6 +32,18 @@ const ANIM_ICON_SCALE = 1.5;
 const ANIM_ICON_HIT_AREA = 2.5;
 const ANIMATE_CACHE_LOOKUP = 4;
 
+// per-frame tunings below were made at this frame interval (~66fps);
+// scale them by the real frame delta so higher refresh rates keep the
+// same speed and feel
+const ANIM_REFERENCE_FRAME = 15;
+
+// fraction to move toward a target this frame, equivalent to moving
+// by `perFrame` every reference frame
+function frameBlend(perFrame, dt) {
+  if (perFrame >= 1) return 1;
+  return 1 - Math.pow(1 - perFrame, dt / ANIM_REFERENCE_FRAME);
+}
+
 const DOT_CANVAS_SIZE = 96;
 
 export let Animator = class {
@@ -486,19 +498,24 @@ export let Animator = class {
       // fix jitterness
       if (lockPosition && icon._p == 0) {
         icon._positionCache = icon._positionCache || [];
-        var lockThreshold = 48;
+        icon._positionCacheTime = icon._positionCacheTime || 0;
+        var lockThreshold = 48 * ANIM_REFERENCE_FRAME;
         if (
           (icon._prev && icon._prev._locked) ||
           (icon._next && icon._next._locked)
         ) {
-          lockThreshold = 32;
+          lockThreshold = 32 * ANIM_REFERENCE_FRAME;
         }
-        if (icon._positionCache.length > lockThreshold) {
+        if (icon._positionCacheTime > lockThreshold) {
           [translationX, translationY] =
             icon._positionCache[icon._positionCache.length - 1];
           icon._locked = true;
         } else {
+          icon._positionCacheTime += dt;
           icon._positionCache.push([translationX, translationY]);
+          if (icon._positionCache.length > ANIMATE_CACHE_LOOKUP * 2) {
+            icon._positionCache.shift();
+          }
 
           let edgeItems = ANIMATE_CACHE_LOOKUP;
           if (icon._positionCache.length > edgeItems) {
@@ -520,6 +537,7 @@ export let Animator = class {
         }
       } else {
         icon._positionCache = null;
+        icon._positionCacheTime = 0;
       }
 
       if (dock.animation_fps > 0) {
@@ -527,10 +545,11 @@ export let Animator = class {
         icon._icon.translationY = translationY;
       } else {
         //! retain this for smoothness at high fps
-        icon._icon.translationX =
-          (icon._icon.translationX + translationX * 3) / 4;
-        icon._icon.translationY =
-          (icon._icon.translationY + translationY * 3) / 4;
+        let blend = frameBlend(0.75, dt);
+        icon._icon.translationX +=
+          (translationX - icon._icon.translationX) * blend;
+        icon._icon.translationY +=
+          (translationY - icon._icon.translationY) * blend;
       }
 
       // clear bounce animation
@@ -991,7 +1010,7 @@ export let Animator = class {
       let mag = dst.magnitude();
       if (mag > 0) {
         // let ndst = dst.normalize();
-        let v3 = v2.add(dst.multiplyScalar(speed));
+        let v3 = v2.add(dst.multiplyScalar(frameBlend(speed, dt)));
         translationX = v3.x;
         translationY = v3.y;
       }

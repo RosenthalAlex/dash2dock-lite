@@ -1,4 +1,14 @@
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import Clutter from 'gi://Clutter';
+
+function setGeometry(actor, x, y, width, height) {
+  if (actor.x != x || actor.y != y) {
+    actor.set_position(x, y);
+  }
+  if (actor.width != width || actor.height != height) {
+    actor.set_size(width, height);
+  }
+}
 
 // these are hacks to make Dash2Dock Animated compatible with other Extensions
 //
@@ -172,8 +182,54 @@ export const Integrations = class {
     this._bms = null;
   }
 
+  // blur-my-shell looks for a Dash-to-Dock shaped actor tree:
+  // dashtodockContainer > _slider.get_child() > 'dash' > _background, and
+  // (since v72) waits until those have a real allocation before blurring.
+  // Mirror the dock background geometry onto the fake dash so it does.
+  _syncFakeDash(dock) {
+    let dash = dock.fake_dash;
+    let bg = dock._background;
+    if (!dash || !bg) return;
+    setGeometry(dash, 0, 0, Math.max(dock.width, 1), Math.max(dock.height, 1));
+    setGeometry(
+      dash._background,
+      bg.x,
+      bg.y,
+      Math.max(bg.width, 1),
+      Math.max(bg.height, 1)
+    );
+  }
+
+  // dash2dock positions the blur itself every animation frame; stop
+  // blur-my-shell's own (idle, Dash-to-Dock specific) placement from
+  // fighting it
+  _claimBmsDash(dock) {
+    let dashBlur = this._bms?.stateObj?._dash_to_dock_blur;
+    let info = dashBlur?.dashes?.find((d) => d.dash_container === dock);
+    if (info && !info._d2da_claimed) {
+      info._d2da_claimed = true;
+      info.clear_pending_idles?.();
+      // still re-run our own placement when blur-my-shell asks, e.g. after
+      // it recreated the blur widget on a settings change
+      info.update_size = () => {
+        if (this._bms && dock.animator && dock.get_parent()) {
+          this.bms_update_size(dock.animator);
+        }
+      };
+    }
+    return dashBlur;
+  }
+
+  _setOffscreenRedirect(dock, redirect) {
+    if (dock.offscreen_redirect != redirect) {
+      dock.offscreen_redirect = redirect;
+    }
+  }
+
   bms_update_size(animator) {
     let dock = animator.dock;
+
+    this._syncFakeDash(dock);
 
     // blur my shell
     let bms = dock.get_children().find((child) => {
@@ -184,81 +240,80 @@ export const Integrations = class {
     animator._bms = bms;
 
     if (!bms) {
+      this._setOffscreenRedirect(dock, Clutter.OffscreenRedirect.ALWAYS);
       return;
     }
 
     bms.visible = dock.extension.blur_background;
-    if (!bms.visible) {
+    let widget = bms.first_child;
+    if (!bms.visible || !widget || !this._bms) {
+      this._setOffscreenRedirect(dock, Clutter.OffscreenRedirect.ALWAYS);
       return;
     }
 
     // compatible blur-my-shell version 70
     // bms version 70 supports 46,47..up
-    if (
-      dock.extension.integrations._bms &&
-      dock.extension.integrations._bms.metadata.version >= 70
-    ) {
-      let bg_offset_x = dock._background.x;
-      let bg_offset_y = dock._background.y;
-      let rw = dock.renderArea.width;
-      let rh = dock.renderArea.height;
+    if (this._bms.metadata.version >= 70) {
+      let dashBlur = this._claimBmsDash(dock);
+      let bg = dock._background;
 
-      let meta_background = bms.first_child.first_child;
-      if (!meta_background) {
-        // this should exists
-        return;
+      // static blur carries its own (monitor) background actor; dynamic blur
+      // samples whatever is painted behind the widget
+      let isStatic = dashBlur?.is_static ?? widget.get_n_children() > 0;
+
+      bms.set_position(0, 0);
+
+      if (isStatic) {
+        this._setOffscreenRedirect(dock, Clutter.OffscreenRedirect.ALWAYS);
+
+        // the widget shows the whole monitor background; pin its origin to
+        // the monitor origin and clip it to the dock background
+        let monitor = dock._monitor;
+        if (!monitor) return;
+        if (widget._d2da_subpixel === undefined) {
+          widget._d2da_subpixel = widget.y - Math.floor(widget.y);
+        }
+        let [dx, dy] = dock.get_transformed_position();
+        widget.set_position(
+          monitor.x - dx,
+          monitor.y - dy + widget._d2da_subpixel
+        );
+        widget.set_clip(
+          dx + bg.x - monitor.x,
+          dy + bg.y - monitor.y,
+          bg.width,
+          bg.height
+        );
+
+        let meta_background = widget.first_child;
+        if (meta_background) {
+          let opacity = (dock.extension.background_color[3] ?? 0.5) * 54 + 200;
+          meta_background.opacity = opacity;
+        }
+      } else {
+        // background blur reads the framebuffer behind the widget; inside an
+        // offscreen-redirected dock that framebuffer is empty
+        this._setOffscreenRedirect(
+          dock,
+          Clutter.OffscreenRedirect.AUTOMATIC_FOR_OPACITY
+        );
+
+        if (widget.has_clip) {
+          widget.remove_clip();
+        }
+        setGeometry(widget, bg.x, bg.y, bg.width, bg.height);
       }
 
-      // bottom layout
-      switch (dock._position) {
-        case 'left':
-        case 'top':
-          bms.x = 0;
-          bms.y = 0;
-          bms.first_child.x = 0;
-          bms.first_child.y = 0;
-          bms.first_child.set_clip(
-            bg_offset_x,
-            bg_offset_y,
-            dock._background.width - (dock.extension.border_thickness && 0),
-            dock._background.height - (dock.extension.border_thickness && 0)
-          );
-          break;
-        case 'right':
-          bms.x = 0;
-          bms.y = 0;
-          bms.first_child.x = -meta_background.width + rw;
-          bms.first_child.y = 0;
-          bms.first_child.set_clip(
-            -bms.first_child.x + bg_offset_x,
-            0 + bg_offset_y,
-            dock._background.width - (dock.extension.border_thickness && 0),
-            dock._background.height - (dock.extension.border_thickness && 0)
-          );
-          break;
-        case 'bottom':
-        default:
-          bms.x = 0;
-          bms.y = 0;
-          bms.first_child.x = 0;
-          bms.first_child.y = -meta_background.height + rh;
-          bms.first_child.set_clip(
-            0 + bg_offset_x,
-            -bms.first_child.y + bg_offset_y,
-            dock._background.width - (dock.extension.border_thickness && 0),
-            dock._background.height - (dock.extension.border_thickness && 0)
-          );
-          break;
-      }
-
-      let opacity = (dock.extension.background_color[3] ?? 0.5) * 54 + 200;
-      meta_background.opacity = opacity;
-
-      animator._blur_effects = bms.first_child.get_effects();
+      animator._blur_effects = widget.get_effects();
       if (animator._blur_effects) {
         animator._blur_effects.forEach((e) => {
           if (e.constructor.name == 'CornerEffect') {
             e.radius = dock.extension.computed_border_radius;
+          } else if (
+            'unscaled_corner_radius' in e &&
+            e.unscaled_corner_radius != dock.extension.computed_border_radius
+          ) {
+            e.unscaled_corner_radius = dock.extension.computed_border_radius;
           }
         });
       }

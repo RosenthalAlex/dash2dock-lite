@@ -41,6 +41,11 @@
         <summary>Open app animation</summary>
         <description>Open app animation.</description>
     </key>
+    <key type="b" name="lamp-open-animation">
+        <default>false</default>
+        <summary>Lamp open animation</summary>
+        <description>When launching an app, its icon jumps up and waits until the app's window opens, which then comes out of the icon like a genie from a lamp.</description>
+    </key>
     <key type="b" name="lamp-app-animation">
         <default>false</default>
         <summary>Minimize app lamp animation</summary>

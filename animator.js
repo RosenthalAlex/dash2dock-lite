@@ -5,6 +5,7 @@ import St from 'gi://St';
 import Graphene from 'gi://Graphene';
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 const Point = Graphene.Point;
 
 import { Dot } from './apps/dot.js';
@@ -25,12 +26,43 @@ import {
   isOverlapRect,
 } from './utils.js';
 
-const ANIM_POSITION_PER_SEC = 550 / 1000;
-const ANIM_SIZE_PER_SEC = 250 / 1000;
+// time constants (msecs) for easing icon position and size toward their
+// targets; divided by the animation speed setting
+const ANIM_POSITION_TAU = 25;
+const ANIM_SIZE_TAU = 30;
 const ANIM_ICON_RAISE = 0.5;
 const ANIM_ICON_SCALE = 1.5;
 const ANIM_ICON_HIT_AREA = 2.5;
 const ANIMATE_CACHE_LOOKUP = 4;
+
+// per-frame tunings below were made at this frame interval (~66fps);
+// scale them by the real frame delta so higher refresh rates keep the
+// same speed and feel
+const ANIM_REFERENCE_FRAME = 15;
+
+// fraction to move toward a target this frame, equivalent to moving
+// by `perFrame` every reference frame
+function frameBlend(perFrame, dt) {
+  if (perFrame >= 1) return 1;
+  return 1 - Math.pow(1 - perFrame, dt / ANIM_REFERENCE_FRAME);
+}
+
+// fraction to move toward a target this frame when easing exponentially
+// with time constant `tau`; frame rate independent and never overshoots
+function easeBlend(dt, tau) {
+  return 1 - Math.exp(-dt / tau);
+}
+
+// 0 at edge0, 1 at edge1, smooth in between
+function smoothstep(edge0, edge1, x) {
+  let t = Math.min(Math.max((x - edge0) / (edge1 - edge0), 0), 1);
+  return t * t * (3 - 2 * t);
+}
+
+// launch animation (liftIcon): times in msecs
+const LIFT_RISE_TIME = 250;
+const LIFT_FALL_TIME = 600;
+const LIFT_TIMEOUT = 15000;
 
 const DOT_CANVAS_SIZE = 96;
 
@@ -45,6 +77,12 @@ export let Animator = class {
   }
 
   disable() {
+    this._lifts?.forEach((lift) => {
+      this._stopLift(lift);
+      this._clearLiftTimeout(lift);
+    });
+    this._lifts = null;
+
     if (this._target) {
       this._target.remove_all_children();
     }
@@ -378,11 +416,17 @@ export let Animator = class {
       // }
 
       let scale = icon._scale;
-      if (scale > 1.1) {
-        // affect spread
-        let offset = Math.floor(
-          1.25 * (scale - 1) * iconSize * scaleFactor * spread * 0.5
-        );
+      if (scale > 1) {
+        // affect spread; faded in (rather than switched on at 1.1) and not
+        // rounded, so neighbours move continuously with the pointer
+        let offset =
+          smoothstep(1, 1.1, scale) *
+          1.25 *
+          (scale - 1) *
+          iconSize *
+          scaleFactor *
+          spread *
+          0.5;
         // left
         for (let j = i - 1; j >= 0; j--) {
           let left = iconTable[j];
@@ -402,8 +446,22 @@ export let Animator = class {
     dock._hoveredIcon = hoveredIcon;
     let TRANSLATE_COEF = 24;
     if (nearestIcon) {
-      nearestIcon._targetScale += 0.1;
-      let adjust = nearestIcon._translate / 2;
+      // favour the icon under the pointer, blending between neighbours
+      // instead of jumping to whichever icon is nearest; likewise for the
+      // re-centering offset
+      let weightSum = 0;
+      let translateSum = 0;
+      animateIcons.forEach((icon) => {
+        if (!icon._icon || !icon._pos) return;
+        let d = vertical ? icon._pos[1] - py : icon._pos[0] - px;
+        let span = (vertical ? icon.height : icon.width) || 1;
+        let w = Math.max(0, 1 - Math.abs(d) / span);
+        icon._targetScale += 0.1 * smoothstep(0, 1, w);
+        weightSum += w;
+        translateSum += w * icon._translate;
+      });
+      let adjust =
+        (weightSum > 0 ? translateSum / weightSum : nearestIcon._translate) / 2;
       animateIcons.forEach((icon) => {
         if (!icon._icon) return;
         if (icon._scale > 1) {
@@ -460,7 +518,9 @@ export let Animator = class {
       // animate position
       //-------------------
       {
-        let speed = ANIM_POSITION_PER_SEC * slowDown;
+        // ease exponentially: follows a fast moving pointer without lagging
+        // behind at a capped speed
+        let blend = easeBlend(dt, ANIM_POSITION_TAU / slowDown);
         let targetPosition = new Vector([translationX, translationY, 0]);
         let currentPosition = new Vector([
           icon._icon.translationX,
@@ -468,15 +528,9 @@ export let Animator = class {
           0,
         ]);
         let dst = targetPosition.subtract(currentPosition);
-        let mag = dst.magnitude();
-        if (mag > 0) {
-          dst = dst.normalize();
-        }
-        let deltaVector = dst.multiplyScalar(speed * dt);
-        let deltaMag = deltaVector.magnitude();
-        let appliedVector = new Vector([targetPosition.x, targetPosition.y, 0]);
-        if (deltaMag < mag) {
-          appliedVector = currentPosition.add(deltaVector);
+        let appliedVector = currentPosition.add(dst.multiplyScalar(blend));
+        if (dst.magnitude() < 0.05) {
+          appliedVector = targetPosition;
         }
         translationX = appliedVector.x;
         translationY = appliedVector.y;
@@ -486,19 +540,24 @@ export let Animator = class {
       // fix jitterness
       if (lockPosition && icon._p == 0) {
         icon._positionCache = icon._positionCache || [];
-        var lockThreshold = 48;
+        icon._positionCacheTime = icon._positionCacheTime || 0;
+        var lockThreshold = 48 * ANIM_REFERENCE_FRAME;
         if (
           (icon._prev && icon._prev._locked) ||
           (icon._next && icon._next._locked)
         ) {
-          lockThreshold = 32;
+          lockThreshold = 32 * ANIM_REFERENCE_FRAME;
         }
-        if (icon._positionCache.length > lockThreshold) {
+        if (icon._positionCacheTime > lockThreshold) {
           [translationX, translationY] =
             icon._positionCache[icon._positionCache.length - 1];
           icon._locked = true;
         } else {
+          icon._positionCacheTime += dt;
           icon._positionCache.push([translationX, translationY]);
+          if (icon._positionCache.length > ANIMATE_CACHE_LOOKUP * 2) {
+            icon._positionCache.shift();
+          }
 
           let edgeItems = ANIMATE_CACHE_LOOKUP;
           if (icon._positionCache.length > edgeItems) {
@@ -520,6 +579,7 @@ export let Animator = class {
         }
       } else {
         icon._positionCache = null;
+        icon._positionCacheTime = 0;
       }
 
       if (dock.animation_fps > 0) {
@@ -527,14 +587,19 @@ export let Animator = class {
         icon._icon.translationY = translationY;
       } else {
         //! retain this for smoothness at high fps
-        icon._icon.translationX =
-          (icon._icon.translationX + translationX * 3) / 4;
-        icon._icon.translationY =
-          (icon._icon.translationY + translationY * 3) / 4;
+        let blend = frameBlend(0.75, dt);
+        icon._icon.translationX +=
+          (translationX - icon._icon.translationX) * blend;
+        icon._icon.translationY +=
+          (translationY - icon._icon.translationY) * blend;
       }
 
-      // clear bounce animation
-      if (icon._appwell) {
+      // clear bounce animation (a lifted launching icon stays up)
+      let lift = icon._appwell ? this._lifts?.get(icon._appwell._id) : null;
+      if (lift?.phase == 'hold' && !lift.seq) {
+        this._applyBounce(icon._appwell._id, lift.travel);
+      }
+      if (icon._appwell && !lift) {
         icon._appwell.translationY = 0;
         didBounce = icon._appwell._bounce;
         // clear bounce
@@ -641,15 +706,9 @@ export let Animator = class {
         let currentSize = renderer.icon_size * renderer.scaleX;
         {
           let dst = targetSize - currentSize;
-          let mag = Math.abs(dst);
-          let dir = Math.sign(dst);
-          let accel = 0;
-          let pixelOverTime = ANIM_SIZE_PER_SEC * slowDown;
-          let deltaSize = pixelOverTime * dir * dt;
-          let appliedSize = deltaSize;
-          appliedSize += accel;
-          if (Math.abs(appliedSize) > mag) {
-            appliedSize = dst * 0.5;
+          let appliedSize = dst * easeBlend(dt, ANIM_SIZE_TAU / slowDown);
+          if (Math.abs(dst) < 0.05) {
+            appliedSize = dst;
           }
           targetSize = currentSize + appliedSize;
           icon._deltaSize = appliedSize;
@@ -991,7 +1050,7 @@ export let Animator = class {
       let mag = dst.magnitude();
       if (mag > 0) {
         // let ndst = dst.normalize();
-        let v3 = v2.add(dst.multiplyScalar(speed));
+        let v3 = v2.add(dst.multiplyScalar(frameBlend(speed, dt)));
         translationX = v3.x;
         translationY = v3.y;
       }
@@ -1083,49 +1142,191 @@ export let Animator = class {
     dock.extension.integrations.bms_update_size(this);
   }
 
+  // [container, appwell] of the dock icon of `app_id`, if it is shown
+  _bounceTarget(app_id) {
+    let dock = this.dock;
+    if (dock._dragging) return [null, null];
+    let icons = dock._findIcons();
+    let icon = icons.find((icon) => {
+      return icon._appwell && icon._appwell._id == app_id;
+    });
+    if (!icon || !icon._appwell) {
+      return [null, null];
+    }
+    return [icon._appwell.get_parent(), icon._appwell];
+  }
+
+  _translateBounceDecor(container, appwell) {
+    try {
+      if (!container._icon) return;
+      if (container._renderer) {
+        container._renderer.translationY = appwell.translationY;
+      }
+      if (container._image) {
+        container._image.translationY = appwell.translationY;
+      }
+      if (container._badge) {
+        container._badge.translationY = appwell.translationY;
+      }
+      if (container._label) {
+        container._label.opacity = 0;
+      }
+    } catch (err) {
+      console.log(err);
+    }
+  }
+
+  // raise the icon of `app_id` by `res` pixels, away from the screen edge
+  _applyBounce(app_id, res) {
+    let dock = this.dock;
+    let [container, appwell] = this._bounceTarget(app_id);
+    if (!appwell) return;
+    try {
+      appwell._bounce = true;
+      if (dock.isVertical()) {
+        appwell.translation_x =
+          dock._position == DockPosition.LEFT ? res : -res;
+        if (container._renderer) {
+          container._renderer.translationX = appwell.translationX;
+        }
+      } else {
+        appwell.translation_y =
+          dock._position == DockPosition.BOTTOM ? -res : res;
+        if (container._renderer) {
+          container._renderer.translationY = appwell.translationY;
+        }
+      }
+    } catch (err) {
+      console.log(err);
+    }
+    this._translateBounceDecor(container, appwell);
+  }
+
+  _bounceTravel() {
+    let dock = this.dock;
+    return (
+      (dock._iconSize / 3) *
+      ((0.25 + dock.extension.animation_bounce_height) * 1.5)
+    );
+  }
+
+  // macOS-like launch: the icon jumps up and stays there until dropIcon()
+  // is called (the app's window opened), then falls back with a bounce
+  liftIcon(appwell) {
+    let app_id = appwell._id;
+    this._lifts = this._lifts ?? new Map();
+    let lift = this._lifts.get(app_id);
+    if (lift) {
+      // lifted again while falling: go back up
+      if (lift.phase == 'fall') {
+        lift.phase = 'hold';
+        lift.time = 0;
+        this._runLift(app_id);
+      }
+      return;
+    }
+
+    lift = { phase: 'rise', time: 0, travel: this._bounceTravel() };
+    this._lifts.set(app_id, lift);
+
+    // the app never showed a window
+    lift.timeoutId = GLib.timeout_add(
+      GLib.PRIORITY_DEFAULT,
+      LIFT_TIMEOUT,
+      () => {
+        lift.timeoutId = 0;
+        this.dropIcon(app_id);
+        return GLib.SOURCE_REMOVE;
+      }
+    );
+
+    this._runLift(app_id);
+  }
+
+  dropIcon(app_id) {
+    let lift = this._lifts?.get(app_id);
+    if (!lift || lift.phase == 'fall') return;
+    lift.phase = 'fall';
+    lift.time = 0;
+    this._clearLiftTimeout(lift);
+    this._runLift(app_id);
+  }
+
+  // Animates the rise and the fall of a lifted icon, frame by frame. While it
+  // holds up (the app loads, which can take seconds), nothing is redrawn.
+  _runLift(app_id) {
+    let lift = this._lifts?.get(app_id);
+    if (!lift || lift.seq) return;
+
+    lift.seq = this.dock.extension._hiTimer.runLoop(
+      (s) => {
+        lift.time += s._elapsed;
+        let travel = lift.travel;
+
+        if (lift.phase == 'rise') {
+          let p = Math.min(lift.time / LIFT_RISE_TIME, 1);
+          this._applyBounce(app_id, travel * CubicEaseOut(p));
+          if (p >= 1) {
+            lift.phase = 'hold';
+            lift.time = 0;
+            this._stopLift(lift);
+          }
+          return;
+        }
+
+        if (lift.phase == 'hold') {
+          this._applyBounce(app_id, travel);
+          this._stopLift(lift);
+          return;
+        }
+
+        // fall
+        let t = Math.min(lift.time, LIFT_FALL_TIME);
+        this._applyBounce(
+          app_id,
+          Bounce.easeOut(t, travel, -travel, LIFT_FALL_TIME)
+        );
+        if (lift.time >= LIFT_FALL_TIME) {
+          this._applyBounce(app_id, 0);
+          let [, appwell] = this._bounceTarget(app_id);
+          if (appwell) appwell._bounce = false;
+          this._stopLift(lift);
+          this._clearLiftTimeout(lift);
+          this._lifts.delete(app_id);
+        }
+      },
+      0,
+      'liftIcon'
+    );
+  }
+
+  _stopLift(lift) {
+    if (lift.seq) {
+      this.dock.extension._hiTimer?.cancel(lift.seq);
+      lift.seq = null;
+    }
+  }
+
+  _clearLiftTimeout(lift) {
+    if (lift.timeoutId) {
+      GLib.source_remove(lift.timeoutId);
+      lift.timeoutId = 0;
+    }
+  }
+
   bounceIcon(appwell) {
     let dock = this.dock;
     let app_id = appwell._id;
 
     // let scaleFactor = dock.getMonitor().geometry_scale;
     //! why not scaleFactor?
-    let travel =
-      (dock._iconSize / 3) *
-      ((0.25 + dock.extension.animation_bounce_height) * 1.5);
+    let travel = this._bounceTravel();
     // * scaleFactor;
     appwell.translation_y = 0;
 
-    const getTarget = (app_id) => {
-      if (dock._dragging) return [null, null];
-      let icons = dock._findIcons();
-      let icon = icons.find((icon) => {
-        return icon._appwell && icon._appwell._id == app_id;
-      });
-      if (!icon || !icon._appwell) {
-        return [null, null];
-      }
-      return [icon._appwell.get_parent(), icon._appwell];
-    };
-
-    const translateDecor = (container, appwell) => {
-      try {
-        if (!container._icon) return;
-        if (container._renderer) {
-          container._renderer.translationY = appwell.translationY;
-        }
-        if (container._image) {
-          container._image.translationY = appwell.translationY;
-        }
-        if (container._badge) {
-          container._badge.translationY = appwell.translationY;
-        }
-        if (container._label) {
-          container._label.opacity = 0;
-        }
-      } catch (err) {
-        console.log(err);
-      }
-    };
+    const getTarget = (app_id) => this._bounceTarget(app_id);
+    const translateDecor = (container, appwell) =>
+      this._translateBounceDecor(container, appwell);
 
     let t = 250;
     let _frames = [
@@ -1133,54 +1334,14 @@ export let Animator = class {
         _duration: t,
         _func: (f, s) => {
           let res = Linear.easeNone(f._time, 0, travel, f._duration);
-          let [container, appwell] = getTarget(app_id);
-          if (!appwell) return;
-          try {
-            appwell._bounce = true;
-            if (dock.isVertical()) {
-              appwell.translation_x =
-                dock._position == DockPosition.LEFT ? res : -res;
-              if (container._renderer) {
-                container._renderer.translationX = appwell.translationX;
-              }
-            } else {
-              appwell.translation_y =
-                dock._position == DockPosition.BOTTOM ? -res : res;
-              if (container._renderer) {
-                container._renderer.translationY = appwell.translationY;
-              }
-            }
-          } catch (err) {
-            console.log(err);
-          }
-          translateDecor(container, appwell);
+          this._applyBounce(app_id, res);
         },
       },
       {
         _duration: t * 3,
         _func: (f, s) => {
           let res = Bounce.easeOut(f._time, travel, -travel, f._duration);
-          let [container, appwell] = getTarget(app_id);
-          if (!appwell) return;
-          try {
-            appwell._bounce = true;
-            if (dock.isVertical()) {
-              appwell.translation_x = appwell.translation_x =
-                dock._position == DockPosition.LEFT ? res : -res;
-              if (container._renderer) {
-                container._renderer.translationX = appwell.translationX;
-              }
-            } else {
-              appwell.translation_y =
-                dock._position == DockPosition.BOTTOM ? -res : res;
-              if (container._renderer) {
-                container._renderer.translationY = appwell.translationY;
-              }
-            }
-          } catch (err) {
-            console.log(err);
-          }
-          translateDecor(container, appwell);
+          this._applyBounce(app_id, res);
         },
       },
     ];

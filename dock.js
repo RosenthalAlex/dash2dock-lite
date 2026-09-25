@@ -43,7 +43,8 @@ export const DockAlignment = {
   END: 'end',
 };
 
-const PREVIEW_FRAMES = 64;
+const PREVIEW_DURATION = 64 * 15; // msecs
+const FAST_FORWARD_STEP = 15; // msecs
 const ANIM_DEBOUNCE_END_DELAY = 750;
 
 const MIN_SCROLL_RESOLUTION = 4;
@@ -83,6 +84,10 @@ export let Dock = GObject.registerClass(
         get_parent: () => {
           return this;
         },
+        // blur-my-shell connects to Dash-to-Dock's slider (a GObject) for
+        // slide/allocation changes; we position the blur ourselves
+        connect: () => 0,
+        disconnect: () => {},
       };
 
       // pretend to be Dash-to-Dock
@@ -94,7 +99,10 @@ export let Dock = GObject.registerClass(
       });
       this.fake_dash.add_child(this.fake_dash_background);
       this.fake_dash._background = this.fake_dash_background;
-      this.fake_dash.visible = false;
+      // must stay visible (but unpainted) so it gets a real allocation,
+      // which blur-my-shell waits for; integrations keeps its geometry
+      // in sync with the dock background
+      this.fake_dash.opacity = 0;
 
       this.renderArea = new St.Widget({
         name: 'DockRenderArea',
@@ -1203,7 +1211,7 @@ export let Dock = GObject.registerClass(
     }
 
     preview() {
-      this._preview = PREVIEW_FRAMES;
+      this._preview = PREVIEW_DURATION;
       this.animator._computed = null;
     }
 
@@ -1226,7 +1234,7 @@ export let Dock = GObject.registerClass(
         }
 
         this.simulated_pointer = p;
-        this._preview--;
+        this._preview = Math.max(this._preview - dt, 0);
       }
 
       //! add layout here instead of at the
@@ -1235,7 +1243,7 @@ export let Dock = GObject.registerClass(
       // hack to mitigate jerkiness when a new icon is inserted
       if (!this._pauseBounce || this._pauseBounce <= 0) {
         while (this._fast_forward && this._fast_forward-- > 0) {
-          this.animate(dt);
+          this.animate(FAST_FORWARD_STEP);
           this.dash.opacity = 0;
         }
       }
@@ -1281,7 +1289,7 @@ export let Dock = GObject.registerClass(
         if (!this._animationSeq) {
           this._animationSeq = this.extension._hiTimer.runLoop(
             (s) => {
-              this.animate(s._delay);
+              this.animate(s._elapsed);
             },
             this.animationInterval,
             'animationTimer'
@@ -1451,6 +1459,16 @@ export let Dock = GObject.registerClass(
 
     _maybeBounce(container, just_do_it) {
       if (this._pauseBounce && this._pauseBounce > 0) {
+        return;
+      }
+      // launching an app without windows: the icon waits up for the window
+      let app = container.child?.app;
+      if (
+        this.extension.lamp_open_animation &&
+        app?.get_n_windows &&
+        !app.get_n_windows()
+      ) {
+        this.extension.lampLauncher?.expect(app);
         return;
       }
       if (!this.extension.open_app_animation) {

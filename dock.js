@@ -95,7 +95,10 @@ export let Dock = GObject.registerClass(
       });
       this.fake_dash.add_child(this.fake_dash_background);
       this.fake_dash._background = this.fake_dash_background;
-      this.fake_dash.visible = false;
+      // must stay visible (but unpainted) so it gets a real allocation,
+      // which blur-my-shell waits for; integrations keeps its geometry
+      // in sync with the dock background
+      this.fake_dash.opacity = 0;
 
       this.renderArea = new St.Widget({
         name: 'DockRenderArea',

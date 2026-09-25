@@ -12,6 +12,7 @@
 
 * Bug fixes
 * Animations run at the display's refresh rate (e.g. 120/144/165Hz) instead of being capped at ~60fps
+* Smoother magnification: icons scale and spread continuously as the pointer moves between them
 
 # Release 84
 

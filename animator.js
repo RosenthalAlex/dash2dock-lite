@@ -25,8 +25,10 @@ import {
   isOverlapRect,
 } from './utils.js';
 
-const ANIM_POSITION_PER_SEC = 550 / 1000;
-const ANIM_SIZE_PER_SEC = 250 / 1000;
+// time constants (msecs) for easing icon position and size toward their
+// targets; divided by the animation speed setting
+const ANIM_POSITION_TAU = 25;
+const ANIM_SIZE_TAU = 30;
 const ANIM_ICON_RAISE = 0.5;
 const ANIM_ICON_SCALE = 1.5;
 const ANIM_ICON_HIT_AREA = 2.5;
@@ -42,6 +44,18 @@ const ANIM_REFERENCE_FRAME = 15;
 function frameBlend(perFrame, dt) {
   if (perFrame >= 1) return 1;
   return 1 - Math.pow(1 - perFrame, dt / ANIM_REFERENCE_FRAME);
+}
+
+// fraction to move toward a target this frame when easing exponentially
+// with time constant `tau`; frame rate independent and never overshoots
+function easeBlend(dt, tau) {
+  return 1 - Math.exp(-dt / tau);
+}
+
+// 0 at edge0, 1 at edge1, smooth in between
+function smoothstep(edge0, edge1, x) {
+  let t = Math.min(Math.max((x - edge0) / (edge1 - edge0), 0), 1);
+  return t * t * (3 - 2 * t);
 }
 
 const DOT_CANVAS_SIZE = 96;
@@ -390,11 +404,17 @@ export let Animator = class {
       // }
 
       let scale = icon._scale;
-      if (scale > 1.1) {
-        // affect spread
-        let offset = Math.floor(
-          1.25 * (scale - 1) * iconSize * scaleFactor * spread * 0.5
-        );
+      if (scale > 1) {
+        // affect spread; faded in (rather than switched on at 1.1) and not
+        // rounded, so neighbours move continuously with the pointer
+        let offset =
+          smoothstep(1, 1.1, scale) *
+          1.25 *
+          (scale - 1) *
+          iconSize *
+          scaleFactor *
+          spread *
+          0.5;
         // left
         for (let j = i - 1; j >= 0; j--) {
           let left = iconTable[j];
@@ -414,8 +434,22 @@ export let Animator = class {
     dock._hoveredIcon = hoveredIcon;
     let TRANSLATE_COEF = 24;
     if (nearestIcon) {
-      nearestIcon._targetScale += 0.1;
-      let adjust = nearestIcon._translate / 2;
+      // favour the icon under the pointer, blending between neighbours
+      // instead of jumping to whichever icon is nearest; likewise for the
+      // re-centering offset
+      let weightSum = 0;
+      let translateSum = 0;
+      animateIcons.forEach((icon) => {
+        if (!icon._icon || !icon._pos) return;
+        let d = vertical ? icon._pos[1] - py : icon._pos[0] - px;
+        let span = (vertical ? icon.height : icon.width) || 1;
+        let w = Math.max(0, 1 - Math.abs(d) / span);
+        icon._targetScale += 0.1 * smoothstep(0, 1, w);
+        weightSum += w;
+        translateSum += w * icon._translate;
+      });
+      let adjust =
+        (weightSum > 0 ? translateSum / weightSum : nearestIcon._translate) / 2;
       animateIcons.forEach((icon) => {
         if (!icon._icon) return;
         if (icon._scale > 1) {
@@ -472,7 +506,9 @@ export let Animator = class {
       // animate position
       //-------------------
       {
-        let speed = ANIM_POSITION_PER_SEC * slowDown;
+        // ease exponentially: follows a fast moving pointer without lagging
+        // behind at a capped speed
+        let blend = easeBlend(dt, ANIM_POSITION_TAU / slowDown);
         let targetPosition = new Vector([translationX, translationY, 0]);
         let currentPosition = new Vector([
           icon._icon.translationX,
@@ -480,15 +516,9 @@ export let Animator = class {
           0,
         ]);
         let dst = targetPosition.subtract(currentPosition);
-        let mag = dst.magnitude();
-        if (mag > 0) {
-          dst = dst.normalize();
-        }
-        let deltaVector = dst.multiplyScalar(speed * dt);
-        let deltaMag = deltaVector.magnitude();
-        let appliedVector = new Vector([targetPosition.x, targetPosition.y, 0]);
-        if (deltaMag < mag) {
-          appliedVector = currentPosition.add(deltaVector);
+        let appliedVector = currentPosition.add(dst.multiplyScalar(blend));
+        if (dst.magnitude() < 0.05) {
+          appliedVector = targetPosition;
         }
         translationX = appliedVector.x;
         translationY = appliedVector.y;
@@ -660,15 +690,9 @@ export let Animator = class {
         let currentSize = renderer.icon_size * renderer.scaleX;
         {
           let dst = targetSize - currentSize;
-          let mag = Math.abs(dst);
-          let dir = Math.sign(dst);
-          let accel = 0;
-          let pixelOverTime = ANIM_SIZE_PER_SEC * slowDown;
-          let deltaSize = pixelOverTime * dir * dt;
-          let appliedSize = deltaSize;
-          appliedSize += accel;
-          if (Math.abs(appliedSize) > mag) {
-            appliedSize = dst * 0.5;
+          let appliedSize = dst * easeBlend(dt, ANIM_SIZE_TAU / slowDown);
+          if (Math.abs(dst) < 0.05) {
+            appliedSize = dst;
           }
           targetSize = currentSize + appliedSize;
           icon._deltaSize = appliedSize;
